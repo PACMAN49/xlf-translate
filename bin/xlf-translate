@@ -1,10 +1,68 @@
 #!/usr/bin/env node
 'use strict';
 
+// Based on
+// Fix on https://github.com/tsvetomir/xlf-translate to...
+// -> support ID fields directly on a trans-unit 'id' attribute instead of trans-unit.node.meaning (ex: ng-bootstrap i18n)
+// -> support description generated from id and source instead of missing trans-unit.node.description
+// See: https://github.com/tsvetomir/xlf-translate/issues/9
+
+const jp = require('jsonpath');
 const yaml = require('js-yaml');
 const fs = require('fs');
 const cheerio = require('cheerio');
-const translate = require('../translate');
+
+const indent = node => {
+    const indent = node.parent().html().match(/^\s+/);
+    return indent !== null ? indent[0] : '';
+};
+
+/**
+ * Fills in translations in XLIFF files based on 'meaning' metadata as a key.
+ *
+ * @param doc an XLIFF document parsed with cheerio
+ * @param lang a tree of keys and their corresponding translations
+ * @return statistics the messages will be filled in-place
+ */
+const translate = (doc, lang, force) => {
+    const units = doc('trans-unit').toArray();
+    let stats = { count: 0, skip: 0 };
+
+    units
+        // .filter(unit => unit.find('note').length > 0) // Fix for ng-bootstrap;
+        .map(unit => {
+            const source = doc(unit).find('source');
+            let target = doc(unit).find('target');
+            if (target.length === 0 && source.length === 1) {
+                target = doc('<target />');
+                source.after(indent(source), target);
+            }
+
+            return {
+                target: target,
+                id: doc(unit).find('note[from=meaning]').text() || (unit.attribs ? unit.attribs['id'] : null) // Fix for ng-bootstrap;
+            };
+        })
+        .filter(({ id }) => id && isKey(id))
+        .forEach(({ id, target }) => {
+            const parts = id.split('.').map(part => `['${part}']`);
+            const query = '$' + parts.join('');
+            const match = jp.query(lang, query);
+
+            if (match.length === 1) {
+                if (target.text() === '' || force) {
+                    target.text(match[0]);
+                    stats.count++;
+                } else if (!force) {
+                    stats.skip++;
+                }
+            }
+        });
+
+    return stats;
+};
+
+const isKey = val => val.match(/^[a-zA-Z0-9.\-_]*$/); // Fix for ng-bootstrap;
 
 const args = (() => {
     const argparse = require('argparse');
@@ -46,4 +104,3 @@ const out = messages.html();
 
 fs.writeFileSync(args.file, out);
 console.log(`Done. Replaced ${stats.count} units, skipped ${stats.skip}.`);
-
